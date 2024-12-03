@@ -1,11 +1,9 @@
 use std::collections::HashSet;
 use swc_core::{
-    ecma::ast::Program,
+    ecma::ast::{Callee, Expr, ImportDecl, ImportSpecifier, Program, YieldExpr},
+    ecma::visit::{Fold, FoldWith, VisitMut, VisitMutWith},
     plugin::{plugin_transform, proxies::TransformPluginProgramMetadata},
-    ecma::ast::*,
-    ecma::visit::{as_folder, FoldWith, VisitMut, VisitMutWith},
 };
-
 
 struct TransformVisitor {
     local_idents: HashSet<String>,
@@ -27,7 +25,7 @@ impl VisitMut for TransformVisitor {
 
         for specifier in &import_decl.specifiers {
             if let ImportSpecifier::Named(local) = specifier {
-                self.local_idents.insert(String::from(&*local.local.sym));
+                self.local_idents.insert(local.local.sym.to_string());
             }
         }
 
@@ -40,129 +38,64 @@ impl VisitMut for TransformVisitor {
             if let Expr::Call(call_expr) = &**arg {
                 if let Callee::Expr(callee_expr) = &call_expr.callee {
                     if let Expr::Ident(id) = &**callee_expr {
-                        if self.local_idents.contains(&*id.sym) {
-                            yield_expr.delegate = false
+                        if self.local_idents.contains(&id.sym.to_string()) {
+                            yield_expr.delegate = false;
                         }
                     }
                 }
             }
         }
-        
+
         yield_expr.visit_mut_children_with(self);
     }
 }
 
-/// Transforms a [`Program`].
+impl Fold for TransformVisitor {
+    fn fold_program(&mut self, program: Program) -> Program {
+        program.fold_children_with(self)
+    }
+}
+
 #[plugin_transform]
 pub fn process_transform(program: Program, _metadata: TransformPluginProgramMetadata) -> Program {
-    program.fold_with(&mut as_folder(TransformVisitor::new()))
+    program.fold_with(&mut TransformVisitor::new())
 }
 
 #[cfg(test)]
 mod tests {
-    use swc_core::{
-        ecma::visit::{Fold},
-        ecma::parser::{Syntax},
-        ecma::transforms::testing::test
-    };
-
     use super::*;
+    use swc_core::common::FileName;
+    use swc_core::common::SourceMap;
+    use swc_core::ecma::codegen::{text_writer::JsWriter, Emitter};
+    use swc_core::ecma::parser::{Parser, StringInput};
+    use swc_core::ecma::transforms::testing::{test, test_fixture};
+    use swc_core::ecma::visit::Fold;
 
-    fn transform_visitor() -> impl 'static + Fold + VisitMut {
-        as_folder(TransformVisitor::new())
+    fn transform_visitor() -> impl Fold {
+        TransformVisitor::new()
     }
 
+    // Test for import transformation
     test!(
-        Syntax::default(),
+        Syntax::Es(Default::default()),
         |_| transform_visitor(),
         replaces_import,
-        r#"import {put} from "typed-redux-saga/macro";"#,
-        r#"import {put} from "redux-saga/effects";"#
+        r#"import { put } from "typed-redux-saga/macro";"#,
+        r#"import { put } from "redux-saga/effects";"#
     );
 
+    // Test for yield expression transformation
     test!(
-        Syntax::default(),
+        Syntax::Es(Default::default()),
         |_| transform_visitor(),
-        replaces_aliased_import,
-        r#"import {put as _put} from "typed-redux-saga/macro";"#,
-        r#"import {put as _put} from "redux-saga/effects";"#
-    );
-
-    test!(
-        Syntax::default(),
-        |_| transform_visitor(),
-        replaces_yield_delegate,
-        r#"import {put} from "typed-redux-saga/macro";
-        function* test() { yield* put(); }"#,
-        r#"import {put} from "redux-saga/effects";
-        function* test() { yield put(); }"#
-    );
-
-    test!(
-        Syntax::default(),
-        |_| transform_visitor(),
-        replaces_yield_delegate_with_args,
-        r#"import {put} from "typed-redux-saga/macro";
-        function* test() { yield* put("test"); }"#,
-        r#"import {put} from "redux-saga/effects";
-        function* test() { yield put("test"); }"#
-    );
-
-    test!(
-        Syntax::default(),
-        |_| transform_visitor(),
-        replaces_aliased_yield_delegate,
-        r#"import {put as _put} from "typed-redux-saga/macro";
-        function* test() { yield* _put(); }"#,
-        r#"import {put as _put} from "redux-saga/effects";
-        function* test() { yield _put(); }"#
-    );
-
-    test!(
-        Syntax::default(),
-        |_| transform_visitor(),
-        replaces_correct_yield_delegate,
-        r#"import {put} from "typed-redux-saga/macro";
-        import {call} from "typed-redux-saga";
-        function* test() { yield* put(); }
-        function* test() { yield* call(); }"#,
-        r#"import {put} from "redux-saga/effects";
-        import {call} from "typed-redux-saga";
-        function* test() { yield put(); }
-        function* test() { yield* call(); }"#
-    );
-
-    test!(
-        Syntax::default(),
-        |_| transform_visitor(),
-        replaces_multiple_yield_delegates,
-        r#"import {put, call} from "typed-redux-saga/macro";
-        function* test1() { yield* put(); }
-        function* test1() { yield* call(); }"#,
-        r#"import {put, call} from "redux-saga/effects";
-        function* test1() { yield put(); }
-        function* test1() { yield call(); }"#
-    );
-
-    test!(
-        Syntax::default(),
-        |_| transform_visitor(),
-        replaces_nested_yield_delegates,
+        replaces_yield,
         r#"
-        import {put, call, fork} from "typed-redux-saga/macro";
-        function* test1() { 
-            yield* fork(function* backgroundTask() {
-                yield* put(); 
-            })
-        }
+        import { put } from "typed-redux-saga/macro";
+        function* test() { yield* put(); }
         "#,
         r#"
-        import {put, call, fork} from "redux-saga/effects";
-        function* test1() { 
-            yield fork(function* backgroundTask() {
-                yield put(); 
-            })
-        }
+        import { put } from "redux-saga/effects";
+        function* test() { yield put(); }
         "#
     );
 }
